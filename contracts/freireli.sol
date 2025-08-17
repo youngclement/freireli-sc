@@ -1,97 +1,107 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-contract Logistics {
-    enum StatusEnum {
-        Pending,
-        InTransit,
-        Delivered,
-        Canceled
-    }
+import "./LogisticsBase.sol";
 
-    struct Shipment {
-        string shipmentCode;
-        string productName;
-        string origin;
-        string destination;
-        StatusEnum currentStatus;
-        address creator;
-        address carrier;
-        uint256 createdAt;
-    }
-
-    struct ShipmentEvent {
-        string location;
-        string eventType;
-        uint256 timestamp;
-        address updatedBy;
-    }
-
-    mapping(string => Shipment) public shipments;
-    mapping(string => ShipmentEvent[]) public shipmentEvents;
-
-    event ShipmentCreated(string shipmentCode);
-    event ShipmentEventAdded(string shipmentCode, string eventType);
-    event ShipmentStatusUpdated(string shipmentCode, StatusEnum newStatus);
-
+contract Logistics is LogisticsBase {
+    /// @notice Tạo shipment mới (kèm ký quỹ tùy chọn bằng msg.value)
     function createShipment(
-        string memory _shipmentCode,
-        string memory _productName,
-        string memory _origin,
-        string memory _destination,
-        address _carrier
-    ) public {
-        require(bytes(_shipmentCode).length > 0, "Shipment code cannot be empty");
-        require(shipments[_shipmentCode].creator == address(0), "Shipment already exists");
+        string calldata code,
+        string calldata productName,
+        string calldata origin,
+        string calldata destination,
+        address carrier
+    ) external payable {
+        require(bytes(code).length > 0, "Empty code");
+        require(shipments[code].creator == address(0), "Shipment exists");
+        require(carrier != address(0), "Carrier zero");
 
-        shipments[_shipmentCode] = Shipment({
-            shipmentCode: _shipmentCode,
-            productName: _productName,
-            origin: _origin,
-            destination: _destination,
-            currentStatus: StatusEnum.Pending,
-            creator: msg.sender,
-            carrier: _carrier,
-            createdAt: block.timestamp
-        });
+        // Tránh literal struct lớn => gán từng trường
+        Shipment storage s = shipments[code];
+        s.shipmentCode   = code;
+        s.productName    = productName;
+        s.origin         = origin;
+        s.destination    = destination;
+        s.currentStatus  = StatusEnum.Pending;
+        s.creator        = msg.sender;
+        s.carrier        = carrier;
+        s.createdAt      = block.timestamp;
+        s.depositAmount  = msg.value;
+        // các cờ boolean mặc định false; rating mặc định 0
 
-        emit ShipmentCreated(_shipmentCode);
+        // Audit “khởi tạo”
+        _statusHistory[code].push(StatusChange({
+            oldStatus: StatusEnum.Pending,
+            newStatus: StatusEnum.Pending,
+            timestamp: block.timestamp,
+            changedBy: msg.sender,
+            note: "Shipment created"
+        }));
+
+        emit ShipmentCreated(code, msg.value);
     }
 
+    /// @notice Thêm event vận chuyển
     function addShipmentEvent(
-        string memory _shipmentCode,
-        string memory _location,
-        string memory _eventType
-    ) public {
-        require(shipments[_shipmentCode].creator != address(0), "Shipment not found");
+        string calldata code,
+        string calldata location,
+        string calldata eventType
+    ) external {
+        require(shipments[code].creator != address(0), "Not found");
 
-        shipmentEvents[_shipmentCode].push(ShipmentEvent({
-            location: _location,
-            eventType: _eventType,
+        shipmentEvents[code].push(ShipmentEvent({
+            location: location,
+            eventType: eventType,
             timestamp: block.timestamp,
             updatedBy: msg.sender
         }));
 
-        emit ShipmentEventAdded(_shipmentCode, _eventType);
+        emit ShipmentEventAdded(code, eventType);
     }
 
-    function updateShipmentStatus(string memory _shipmentCode, StatusEnum _newStatus) public {
-        require(shipments[_shipmentCode].creator != address(0), "Shipment not found");
-        require(
-            msg.sender == shipments[_shipmentCode].creator ||
-            msg.sender == shipments[_shipmentCode].carrier,
-            "Not authorized"
-        );
+    /// @notice Cập nhật trạng thái; tự xử lý escrow khi Delivered/Canceled
+    function updateShipmentStatus(
+        string calldata code,
+        StatusEnum newStatus,
+        string calldata note
+    ) external {
+        Shipment storage s = shipments[code];
+        require(s.creator != address(0), "Not found");
+        require(msg.sender == s.creator || msg.sender == s.carrier, "Not authorized");
 
-        shipments[_shipmentCode].currentStatus = _newStatus;
-        emit ShipmentStatusUpdated(_shipmentCode, _newStatus);
+        StatusEnum oldS = s.currentStatus;
+        s.currentStatus = newStatus;
+
+        _recordStatus(code, oldS, newStatus, note);
+
+        if (newStatus == StatusEnum.Delivered) {
+            _releaseEscrow(code);
+        } else if (newStatus == StatusEnum.Canceled) {
+            _refundEscrow(code);
+        }
     }
 
-    function getShipment(string memory _shipmentCode) public view returns (Shipment memory) {
-        return shipments[_shipmentCode];
-    }
+    /// @notice Creator đánh giá carrier sau khi Delivered
+    function rateCarrier(
+        string calldata code,
+        uint8 rating,
+        string calldata feedback
+    ) external {
+        Shipment storage s = shipments[code];
+        require(s.creator != address(0), "Not found");
+        require(msg.sender == s.creator, "Only creator");
+        require(s.currentStatus == StatusEnum.Delivered, "Not delivered");
+        require(!s.rated, "Rated");
+        require(rating >= 1 && rating <= 5, "Rating 1..5");
 
-    function getShipmentEvents(string memory _shipmentCode) public view returns (ShipmentEvent[] memory) {
-        return shipmentEvents[_shipmentCode];
+        s.rated = true;
+        s.rating = rating;
+        s.feedback = feedback;
+
+        CarrierStats storage st = carrierStats[s.carrier];
+        st.totalRatingPoints += rating;
+        st.ratingCount += 1;
+
+        emit CarrierRated(code, s.carrier, rating, feedback);
     }
 }
