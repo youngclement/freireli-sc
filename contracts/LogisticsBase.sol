@@ -3,7 +3,15 @@ pragma solidity ^0.8.20;
 
 abstract contract LogisticsBase {
     // ===== Enums =====
-    enum StatusEnum { Pending, InTransit, Delivered, Canceled }
+    enum StatusEnum { 
+        Pending,           // 0 - Đang chờ xử lý
+        WarehouseConfirmed, // 1 - Warehouse đã confirm
+        QualityApproved,    // 2 - Quality đã approve 
+        ReadyForTransit,    // 3 - Sẵn sàng vận chuyển
+        InTransit,          // 4 - Đang vận chuyển
+        Delivered,          // 5 - Đã giao hàng
+        Canceled            // 6 - Đã hủy
+    }
 
     // ===== Data structs =====
     struct Shipment {
@@ -96,9 +104,9 @@ abstract contract LogisticsBase {
 
     function _setFlag(string memory code, uint8 flagIndex, bool value) internal {
         if (value) {
-            shipments[code].flags |= (1 << flagIndex);
+            shipments[code].flags |= uint8(1 << flagIndex);
         } else {
-            shipments[code].flags &= ~(1 << flagIndex);
+            shipments[code].flags &= ~uint8(1 << flagIndex);
         }
     }
 
