@@ -14,15 +14,15 @@ abstract contract LogisticsBase {
         StatusEnum currentStatus;
         address creator;
         address carrier;
+        address warehouseManager;
+        address qualityInspector;
         uint256 createdAt;
-        // Escrow
         uint256 depositAmount;
-        bool escrowReleased;
-        bool escrowRefunded;
-        // Rating
-        bool rated;
-        uint8 rating;      // 1..5
+        uint256 shippingFee;
+        uint8 flags; // bit flags: escrowReleased(0), escrowRefunded(1), warehouseConfirmed(2), qualityApproved(3), receiverConfirmed(4), rated(5), disputed(6)
+        uint8 rating;
         string feedback;
+        string disputeReason;
     }
 
     struct ShipmentEvent {
@@ -50,6 +50,9 @@ abstract contract LogisticsBase {
     mapping(string => ShipmentEvent[]) internal shipmentEvents;
     mapping(string => StatusChange[]) internal _statusHistory;
     mapping(address => CarrierStats) public carrierStats;
+    mapping(address => bool) public authorizedInspectors;
+    mapping(address => bool) public authorizedWarehouseManagers;
+    address public admin;
 
     // ===== Events =====
     event ShipmentCreated(string shipmentCode, uint256 depositAmount);
@@ -58,6 +61,46 @@ abstract contract LogisticsBase {
     event EscrowReleased(string shipmentCode, address carrier, uint256 amount);
     event EscrowRefunded(string shipmentCode, address creator, uint256 amount);
     event CarrierRated(string shipmentCode, address carrier, uint8 rating, string feedback);
+    event ConfirmationUpdated(string shipmentCode, address actor, uint8 confirmationType);
+    event DisputeRaised(string shipmentCode, string reason, address raisedBy);
+
+    // ===== Modifiers =====
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "!admin");
+        _;
+    }
+
+    // ===== Constructor =====
+    constructor() {
+        admin = msg.sender;
+    }
+
+    // ===== Admin functions =====
+    function setAuthorized(address user, bool authorized, bool isInspector) external onlyAdmin {
+        if (isInspector) {
+            authorizedInspectors[user] = authorized;
+        } else {
+            authorizedWarehouseManagers[user] = authorized;
+        }
+    }
+
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "!addr");
+        admin = newAdmin;
+    }
+
+    // ===== Helper functions =====
+    function _getFlag(string memory code, uint8 flagIndex) internal view returns (bool) {
+        return (shipments[code].flags >> flagIndex) & 1 == 1;
+    }
+
+    function _setFlag(string memory code, uint8 flagIndex, bool value) internal {
+        if (value) {
+            shipments[code].flags |= (1 << flagIndex);
+        } else {
+            shipments[code].flags &= ~(1 << flagIndex);
+        }
+    }
 
     // ===== Reentrancy guard (nhẹ) =====
     bool private _locked;
@@ -88,20 +131,20 @@ abstract contract LogisticsBase {
     function _releaseEscrow(string memory code) internal nonReentrant {
         Shipment storage s = shipments[code];
         uint256 amount = s.depositAmount;
-        if (s.escrowReleased || s.escrowRefunded || amount == 0) return;
-        s.escrowReleased = true;
+        if (_getFlag(code, 0) || _getFlag(code, 1) || amount == 0) return;
+        _setFlag(code, 0, true);
         (bool ok, ) = s.carrier.call{value: amount}("");
-        require(ok, "Transfer to carrier failed");
+        require(ok, "!transfer");
         emit EscrowReleased(code, s.carrier, amount);
     }
 
     function _refundEscrow(string memory code) internal nonReentrant {
         Shipment storage s = shipments[code];
         uint256 amount = s.depositAmount;
-        if (s.escrowReleased || s.escrowRefunded || amount == 0) return;
-        s.escrowRefunded = true;
+        if (_getFlag(code, 0) || _getFlag(code, 1) || amount == 0) return;
+        _setFlag(code, 1, true);
         (bool ok, ) = s.creator.call{value: amount}("");
-        require(ok, "Refund to creator failed");
+        require(ok, "!refund");
         emit EscrowRefunded(code, s.creator, amount);
     }
 
